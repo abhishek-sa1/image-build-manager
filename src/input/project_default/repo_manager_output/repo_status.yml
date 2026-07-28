@@ -50,6 +50,7 @@ repo_manager:
     server_crt: /opt/omnia/pulp/settings/certs/pulp_webserver.crt
     server_key: /opt/omnia/pulp/settings/certs/pulp_webserver.key
     certs_dir: /opt/omnia/pulp/settings/certs
+  package_list: /opt/omnia/repo_manager/output/project_default/functional_group_packages.yml
 
 # RPM Repository Base URLs
 rpm_repos:
