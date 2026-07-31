@@ -50,7 +50,7 @@ from library.functions.host_func import (
     sync_repo_manager_output,
 )
 from library.functions.formatting_func import log
-from library.validation.functions.validation_func import (
+from library.functions.validation_func import (
     validate_all,
     ConfigValidationError,
 )
@@ -253,21 +253,20 @@ def pytest_sessionstart(session):
 
 
 def pytest_sessionfinish(session, exitstatus):
-    """Save report after all tests complete."""
+    """Save report and print summary table after all tests complete."""
     report = get_current_report()
     if report and report.results:
         report.save()
 
+    # Print summary table
+    _print_summary_table(session)
+
 
 @pytest.hookimpl(tryfirst=True, hookwrapper=True)
 def pytest_runtest_makereport(item, call):
-    """Capture test results and output for the HTML report."""
+    """Capture test results and output for the HTML report + summary."""
     outcome = yield
     result = outcome.get_result()
-
-    report = get_current_report()
-    if not report:
-        return
 
     if result.when not in {"call", "setup"}:
         return
@@ -298,13 +297,145 @@ def pytest_runtest_makereport(item, call):
             + f"SKIPPED: {skip_reason}"
         )
 
-    report.add_result({
+    # Extract TC ID from docstring (format: "TC_XX_NNN: ...")
+    tc_id = ""
+    doc = getattr(item.obj, "__doc__", "") or ""
+    if doc.strip().startswith("TC_"):
+        tc_id = doc.strip().split(":", 1)[0].strip()
+
+    # Accumulate for summary table (always)
+    _SESSION_RESULTS.append({
         "test_name": item.name,
+        "tc_id": tc_id,
         "status": status,
         "duration": getattr(result, "duration", 0),
-        "details": details,
-        "error": str(result.longrepr) if result.failed else "",
     })
+
+    # Store in HTML/JSON report
+    report = get_current_report()
+    if report:
+        report.add_result({
+            "test_name": item.name,
+            "status": status,
+            "duration": getattr(result, "duration", 0),
+            "details": details,
+            "error": str(result.longrepr) if result.failed else "",
+        })
+
+
+# =============================================================================
+# SUMMARY TABLE
+# =============================================================================
+
+_SESSION_RESULTS = []
+
+
+def _print_summary_table(session):
+    """Print a summary table of all test results.
+
+    When OMNIA_SUPPRESS_SUMMARY is set, the table is not printed
+    (run_validation.sh prints a combined one at the end instead).
+    When OMNIA_RESULTS_FILE is set, results are appended to that
+    JSON file for aggregation by the shell wrapper.
+    """
+    if not _SESSION_RESULTS:
+        return
+
+    # Export to JSON file for run_validation.sh combined summary
+    results_file = os.environ.get("OMNIA_RESULTS_FILE", "")
+    if results_file:
+        import json
+        existing = []
+        if os.path.isfile(results_file):
+            try:
+                with open(results_file, "r", encoding="utf-8") as fh:
+                    existing = json.load(fh)
+            except (json.JSONDecodeError, OSError):
+                existing = []
+        existing.extend(_SESSION_RESULTS)
+        with open(results_file, "w", encoding="utf-8") as fh:
+            json.dump(existing, fh)
+
+    # Skip printing if shell wrapper will print combined summary
+    if os.environ.get("OMNIA_SUPPRESS_SUMMARY", ""):
+        return
+
+    _do_print_summary(_SESSION_RESULTS)
+
+
+def _do_print_summary(results):
+    """Render the summary table to stdout."""
+    if not results:
+        return
+
+    passed = [r for r in results if r["status"] == "PASSED"]
+    failed = [r for r in results if r["status"] == "FAILED"]
+    skipped = [r for r in results if r["status"] == "SKIPPED"]
+    total = len(results)
+
+    sep = "=" * 85
+    print(f"\n{sep}")
+    print("  TEST EXECUTION SUMMARY")
+    print(sep)
+    print(
+        f"  {'TC ID':<12} {'Test Name':<40} "
+        f"{'Status':<10} {'Duration':>8}"
+    )
+    print(
+        f"  {'-' * 12} {'-' * 40} "
+        f"{'-' * 10} {'-' * 8}"
+    )
+
+    cyan = "\033[36m"
+    reset = "\033[0m"
+    for r in results:
+        tc_id = r.get("tc_id", "")
+        name = r["test_name"]
+        if len(name) > 39:
+            name = name[:36] + "..."
+        status = r["status"]
+        dur = f"{r['duration']:.2f}s"
+        if status == "PASSED":
+            tag = f"\033[32m{status}\033[0m"
+        elif status == "FAILED":
+            tag = f"\033[31m{status}\033[0m"
+        else:
+            tag = f"\033[33m{status}\033[0m"
+        print(
+            f"  {cyan}{tc_id:<12}{reset} {cyan}{name}{reset}"
+            f"{' ' * max(1, 40 - len(name))} "
+            f"{tag:<19} {dur:>8}"
+        )
+
+    print(
+        f"  {'-' * 12} {'-' * 40} "
+        f"{'-' * 10} {'-' * 8}"
+    )
+    total_dur = sum(r["duration"] for r in results)
+    print(
+        f"  \033[32m{len(passed)} passed\033[0m, "
+        f"\033[31m{len(failed)} failed\033[0m, "
+        f"\033[33m{len(skipped)} skipped\033[0m "
+        f"/ {total} total "
+        f"({total_dur:.2f}s)"
+    )
+    print(sep)
+    print()
+
+
+# =============================================================================
+# SUPPRESS PYTEST DOT OUTPUT (TestLogger already provides detail)
+# =============================================================================
+
+def pytest_report_teststatus(report, config):
+    """Replace pytest's default . s F characters with empty strings."""
+    if report.when == "call":
+        if report.passed:
+            return "passed", "", ""
+        elif report.failed:
+            return "failed", "", ""
+    if report.skipped:
+        return "skipped", "", ""
 
 
 # =============================================================================
